@@ -39,9 +39,12 @@ local function cast_value(value, value_type)
 end
 
 
-local function read_json_body(body)
+local function parse_json(body)
   if body then
-    return cjson.decode(body)
+    local status, res = pcall(cjson.decode, body)
+    if status then
+      return res
+    end
   end
 end
 
@@ -90,9 +93,9 @@ end
 
 
 function _M.transform_json_body(conf, buffered_data)
-  local json_body = read_json_body(buffered_data)
+  local json_body = parse_json(buffered_data)
   if json_body == nil then
-    return
+    return nil
   end
 
   -- remove key:value to body

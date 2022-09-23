@@ -135,6 +135,11 @@ describe("Plugin: response-transformer", function()
         assert.same({a = {}}, body_json)
         assert.equals('[]', cjson.encode(body_json.a))
       end)
+      it("plain text", function()
+        local body = "test"
+        local json_body = body_transformer.transform_json_body(conf, body)
+        assert(json_body==nil)
+      end)
     end)
 
     describe("replace", function()

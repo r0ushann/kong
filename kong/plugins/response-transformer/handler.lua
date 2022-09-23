@@ -27,8 +27,10 @@ function ResponseTransformerHandler:body_filter(conf)
   end
 
   local body = kong.response.get_raw_body()
-  if body then
-    return kong.response.set_raw_body(body_transformer.transform_json_body(conf, body))
+
+  local json_body = body_transformer.transform_json_body(conf, body)
+  if json_body then
+    return kong.response.set_raw_body(json_body)
   end
 end
 
