@@ -7,7 +7,8 @@ local pl_file = require "pl.file"
 local ngx_re = require "ngx.re"
 
 local table_merge = utils.table_merge
-local HTTP_PORT = 35000
+local HTTP_SERVER_PORT = 35000
+local PROXY_PORT = 9000
 
 for _, strategy in helpers.each_strategy() do
   describe("opentelemetry exporter #" .. strategy, function()
@@ -40,13 +41,13 @@ for _, strategy in helpers.each_strategy() do
       bp.plugins:insert({
         name = "opentelemetry",
         config = table_merge({
-          endpoint = "http://127.0.0.1:8765",
+          endpoint = "http://127.0.0.1:" .. HTTP_SERVER_PORT,
           batch_flush_delay = -1, -- report immediately
         }, config)
       })
 
       assert(helpers.start_kong({
-        proxy_listen = "0.0.0.0:9000",
+        proxy_listen = "0.0.0.0:" .. PROXY_PORT,
         database = strategy,
         nginx_conf = "spec/fixtures/custom_nginx.template",
         plugins = "opentelemetry",
@@ -56,6 +57,12 @@ for _, strategy in helpers.each_strategy() do
 
     describe("valid #http request", function ()
       lazy_setup(function()
+        bp, _ = assert(helpers.get_db_utils(strategy, {
+          "services",
+          "routes",
+          "plugins",
+        }, { "opentelemetry" }))
+
         setup_instrumentations("all", {
           headers = {
             ["X-Access-Token"] = "token",
@@ -64,15 +71,15 @@ for _, strategy in helpers.each_strategy() do
       end)
 
       lazy_teardown(function()
-        helpers.kill_http_server(HTTP_PORT)
+        helpers.kill_http_server(HTTP_SERVER_PORT)
         helpers.stop_kong()
       end)
 
       it("works", function ()
         local headers, body
         helpers.wait_until(function()
-          local thread = helpers.http_server(HTTP_PORT, { timeout = 10 })
-          local cli = helpers.proxy_client(7000, 9000)
+          local thread = helpers.http_server(HTTP_SERVER_PORT, { timeout = 10 })
+          local cli = helpers.proxy_client(7000, PROXY_PORT)
           local r = assert(cli:send {
             method  = "GET",
             path    = "/",
@@ -86,7 +93,7 @@ for _, strategy in helpers.each_strategy() do
           ok, headers, body = thread:join()
 
           return ok
-        end, 60)
+        end, 10)
 
         assert.is_string(body)
 
@@ -119,6 +126,12 @@ for _, strategy in helpers.each_strategy() do
 
     describe("overwrite resource attributes #http", function ()
       lazy_setup(function()
+        bp, _ = assert(helpers.get_db_utils(strategy, {
+          "services",
+          "routes",
+          "plugins",
+        }, { "opentelemetry" }))
+
         setup_instrumentations("all", {
           resource_attributes = {
             ["service.name"] = "kong_oss",
@@ -128,15 +141,15 @@ for _, strategy in helpers.each_strategy() do
       end)
 
       lazy_teardown(function()
-        helpers.kill_http_server(HTTP_PORT)
+        helpers.kill_http_server(HTTP_SERVER_PORT)
         helpers.stop_kong()
       end)
 
       it("works", function ()
         local headers, body
         helpers.wait_until(function()
-          local thread = helpers.http_server(HTTP_PORT, { timeout = 10 })
-          local cli = helpers.proxy_client(7000)
+          local thread = helpers.http_server(HTTP_SERVER_PORT, { timeout = 10 })
+          local cli = helpers.proxy_client(7000, PROXY_PORT)
           local r = assert(cli:send {
             method  = "GET",
             path    = "/",
@@ -150,7 +163,7 @@ for _, strategy in helpers.each_strategy() do
           ok, headers, body = thread:join()
 
           return ok
-        end, 60)
+        end, 10)
 
         assert.is_string(body)
 
@@ -196,7 +209,7 @@ for _, strategy in helpers.each_strategy() do
         fixtures.http_mock.my_server_block = [[
           server {
             server_name myserver;
-            listen 8765;
+            listen ]] .. HTTP_SERVER_PORT .. [[;
             client_body_buffer_size 1024k;
 
             location / {
@@ -218,7 +231,7 @@ for _, strategy in helpers.each_strategy() do
         for i = 1, 5 do
           local svc = assert(bp.services:insert {
             host = "127.0.0.1",
-            port = 9000,
+            port = PROXY_PORT,
             path = i == 1 and "/" or ("/cascade-" .. (i - 1)),
           })
 
@@ -233,13 +246,13 @@ for _, strategy in helpers.each_strategy() do
 
       lazy_teardown(function()
         -- pl_file.delete("/tmp/kong_opentelemetry_data")
-        helpers.kill_http_server(HTTP_PORT)
+        helpers.kill_http_server(HTTP_SERVER_PORT)
         helpers.stop_kong()
       end)
 
       it("send enough spans", function ()
         local pb_set = {}
-        local cli = helpers.proxy_client(7000, 9000)
+        local cli = helpers.proxy_client(7000, PROXY_PORT)
         local r = assert(cli:send {
           method  = "GET",
           path    = "/cascade-5",
