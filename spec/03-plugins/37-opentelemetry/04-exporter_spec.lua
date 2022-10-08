@@ -237,7 +237,7 @@ for _, strategy in helpers.each_strategy() do
         helpers.stop_kong()
       end)
 
-      it("works", function ()
+      it("send enough spans", function ()
         local pb_set = {}
         local cli = helpers.proxy_client(7000, 9000)
         local r = assert(cli:send {
@@ -258,21 +258,27 @@ for _, strategy in helpers.each_strategy() do
           local body = fd:read("*a")
           pb_set = ngx_re.split(body, "\n")
 
-          print(#pb_set)
+          print("pb set length: ", #pb_set)
           local count = 0
           for _, pb_data in ipairs(pb_set) do
             local decoded = assert(pb.decode("opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest", ngx.decode_base64(pb_data)))
             assert.not_nil(decoded)
             -- print(require("inspect")(decoded))
-            count = count + #decoded.resource_spans[1].scope_spans
+
+            local scope_spans = decoded.resource_spans[1].scope_spans
+            if scope_spans then
+              for _, scope_span in ipairs(scope_spans) do
+                count = count + #scope_span.spans
+              end
+            end
           end
 
-          if count < 5 then
+          if count < 6 then
             return false, "not enough spans: " .. count
           end
 
           return true
-        end, 60)
+        end, 10)
       end)
     end)
 

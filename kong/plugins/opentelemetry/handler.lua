@@ -23,6 +23,8 @@ local tablepool_fetch = tablepool.fetch
 local null = ngx.null
 local encode_traces = otlp.encode_traces
 local transform_span = otlp.transform_span
+local insert = table.insert
+local remove = table.remove
 
 local POOL_BATCH_SPANS = "KONG_OTLP_BATCH_SPANS"
 local _log_prefix = "[otel] "
@@ -76,7 +78,7 @@ local function http_export_request(conf, pb_data, headers)
   end
 
   if res and res.status ~= 200 then
-    ngx_log(ngx_ERR, _log_prefix, "response error: ", res.status, ", body: ", res.body)
+    ngx_log(ngx_ERR, _log_prefix, "response error: ", res.status)
   end
 end
 
@@ -96,12 +98,15 @@ local function http_export(premature, conf)
   -- batch send spans
   local spans_buffer = tablepool_fetch(POOL_BATCH_SPANS, conf.batch_span_count, 0)
 
-  for i = 1, spans_n do
-    local len = (spans_buffer.n or 0) + 1
-    spans_buffer[len] = spans_queue[i]
-    spans_buffer.n = len
+  while true do
+    local span = remove(spans_queue)
+    if not span then
+      break
+    end
 
-    if len >= conf.batch_span_count then
+    insert(spans_buffer, span)
+
+    if #spans_buffer >= conf.batch_span_count then
       local pb_data = encode_traces(spans_buffer, conf.resource_attributes)
       clear(spans_buffer)
 
@@ -110,13 +115,10 @@ local function http_export(premature, conf)
   end
 
   -- remain spans
-  if spans_queue.n and spans_queue.n > 0 then
+  if #spans_buffer > 0 then
     local pb_data = encode_traces(spans_buffer, conf.resource_attributes)
     http_export_request(conf, pb_data, headers)
   end
-
-  -- clear the queue
-  clear(spans_queue)
 
   tablepool_release(POOL_BATCH_SPANS, spans_buffer)
 
@@ -127,9 +129,7 @@ local function http_export(premature, conf)
 end
 
 local function process_span(span)
-  if span.should_sample == false
-      or kong.ctx.plugin.should_sample == false
-  then
+  if span.should_sample == false or kong.ctx.plugin.should_sample == false then
     -- ignore
     return
   end
@@ -142,11 +142,7 @@ local function process_span(span)
 
   local pb_span = transform_span(span)
 
-  local len = spans_queue.n or 0
-  len = len + 1
-
-  spans_queue[len] = pb_span
-  spans_queue.n = len
+  insert(spans_queue, pb_span)
 end
 
 function OpenTelemetryHandler:rewrite()
@@ -186,6 +182,11 @@ function OpenTelemetryHandler:log(conf)
 
   -- transform spans
   kong.tracing.process_span(process_span)
+
+  -- skip if no spans
+  if #spans_queue == 0 then
+    return
+  end
 
   local cache_key = conf.__key__
   local last = last_run_cache[cache_key] or 0
