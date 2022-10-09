@@ -2,16 +2,35 @@ local policy_cluster = require "kong.plugins.rate-limiting.policies.cluster"
 local timestamp = require "kong.tools.timestamp"
 local reports = require "kong.reports"
 local redis = require "resty.redis"
-
+local table_clear = require("table.clear")
 
 local kong = kong
 local pairs = pairs
 local null = ngx.null
+local unix_time = ngx.time
+local now = ngx.now
+local timer_at = ngx.timer.at
 local shm = ngx.shared.kong_rate_limiting_counters
 local fmt = string.format
 
 
 local EMPTY_UUID = "00000000-0000-0000-0000-000000000000"
+
+local last_sync = 0
+
+local cur_usage = {
+  --[[
+    [cache_key] = {
+      expire = <float>
+      value = <integer>
+    }
+  --]]
+}
+local cur_delta = {
+  --[[
+    [cache_key] = <integer>
+  --]]
+}
 
 
 local function is_present(str)
@@ -37,7 +56,7 @@ local function get_service_and_route_ids(conf)
 end
 
 
-local get_local_key = function(conf, identifier, period, period_date)
+local function get_local_key(conf, identifier, period, period_date)
   local service_id, route_id = get_service_and_route_ids(conf)
 
   return fmt("ratelimit:%s:%s:%s:%s:%s", route_id, service_id, identifier,
@@ -112,6 +131,50 @@ local function get_redis_connection(conf)
 end
 
 
+local function sync_to_redis(premature, conf)
+  if premature then
+    return
+  end
+
+  local red, err = get_redis_connection(conf)
+  if not red then
+    return nil, err
+  end
+
+  red:init_pipeline()
+
+  for cache_key, delta in pairs(cur_delta) do
+    red:eval([[
+      local key, value, expiration = KEYS[1], tonumber(ARGV[1]), ARGV[2]
+      local exists = redis.call("exists", key)
+      redis.call("incrby", key, value)
+      if not exists or exists == 0 then
+        redis.call("expireat", key, expiration)
+      end
+    ]], 1, cache_key, delta, cur_usage[cache_key].expire)
+  end
+
+  local _, err = red:commit_pipeline()
+  if err then
+    kong.log.err("failed to commit increment pipeline in Redis: ", err)
+    return nil, err
+  end
+
+  local ok, err = red:set_keepalive(10000, 100)
+  if not ok then
+    kong.log.err("failed to set Redis keepalive: ", err)
+    return nil, err
+  end
+
+  table_clear(cur_usage)
+  table_clear(cur_delta)
+
+  last_sync = now()
+
+  return true
+end
+
+
 return {
   ["local"] = {
     increment = function(conf, limits, identifier, current_timestamp, value)
@@ -139,7 +202,7 @@ return {
       end
 
       return current_metric or 0
-    end
+    end,
   },
   ["cluster"] = {
     increment = function(conf, limits, identifier, current_timestamp, value)
@@ -175,68 +238,81 @@ return {
       end
 
       return 0
-    end
+    end,
   },
   ["redis"] = {
     increment = function(conf, limits, identifier, current_timestamp, value)
-      local red, err = get_redis_connection(conf)
-      if not red then
-        return nil, err
-      end
-
-      local keys = {}
-      local expiration = {}
-      local idx = 0
       local periods = timestamp.get_timestamps(current_timestamp)
-      for period, period_date in pairs(periods) do
-        if limits[period] then
-          local cache_key = get_local_key(conf, identifier, period, period_date)
-          local exists, err = red:exists(cache_key)
-          if err then
-            kong.log.err("failed to query Redis: ", err)
-            return nil, err
-          end
 
-          idx = idx + 1
-          keys[idx] = cache_key
-          if not exists or exists == 0 then
-            expiration[idx] = EXPIRATION[period]
-          end
+      if conf.sync_rate <= 0 then
+        local red, err = get_redis_connection(conf)
+        if not red then
+          return nil, err
+        end
 
-          red:init_pipeline()
-          for i = 1, idx do
-            red:incrby(keys[i], value)
-            if expiration[i] then
-              red:expire(keys[i], expiration[i])
-            end
+        red:init_pipeline()
+
+        for period, period_date in pairs(periods) do
+          if limits[period] then
+            local cache_key = get_local_key(conf, identifier, period, period_date)
+
+            red:eval([[
+              local key, value, expiration = KEYS[1], tonumber(ARGV[1]), ARGV[2]
+              local exists = redis.call("exists", key)
+              redis.call("incrby", key, value)
+              if not exists or exists == 0 then
+                redis.call("expire", key, expiration)
+              end
+            ]], 1, cache_key, value, EXPIRATION[period])
           end
         end
-      end
 
-      local _, err = red:commit_pipeline()
-      if err then
-        kong.log.err("failed to commit increment pipeline in Redis: ", err)
-        return nil, err
-      end
+        local _, err = red:commit_pipeline()
+        if err then
+          kong.log.err("failed to commit increment pipeline in Redis: ", err)
+          return nil, err
+        end
 
-      local ok, err = red:set_keepalive(10000, 100)
-      if not ok then
-        kong.log.err("failed to set Redis keepalive: ", err)
-        return nil, err
-      end
+        local ok, err = red:set_keepalive(10000, 100)
+        if not ok then
+          kong.log.err("failed to set Redis keepalive: ", err)
+        end
 
-      return true
+      else
+        for period, period_date in pairs(periods) do
+          if limits[period] then
+            local cache_key = get_local_key(conf, identifier, period, period_date)
+            cur_delta[cache_key] = (cur_delta[cache_key] or 0) + value
+          end
+        end
+
+        if last_sync - now() >= conf.sync_rate then
+          timer_at(0, sync_to_redis, conf)
+        end
+      end
     end,
     usage = function(conf, identifier, period, current_timestamp)
+      local periods = timestamp.get_timestamps(current_timestamp)
+      local cache_key = get_local_key(conf, identifier, period, periods[period])
+
+      if conf.sync_rate > 0 and cur_usage[cache_key] then
+        if cur_usage[cache_key].expire > unix_time() then
+          return cur_usage[cache_key].value + (cur_delta[cache_key] or 0)
+        end
+
+        cur_usage[cache_key].value = 0
+        cur_usage[cache_key].expire = unix_time() + EXPIRATION[period]
+        cur_delta[cache_key] = 0
+
+        return 0
+      end
+
       local red, err = get_redis_connection(conf)
       if not red then
         return nil, err
       end
 
       reports.retrieve_redis_version(red)
-
-      local periods = timestamp.get_timestamps(current_timestamp)
-      local cache_key = get_local_key(conf, identifier, period, periods[period])
 
       local current_metric, err = red:get(cache_key)
       if err then
@@ -251,6 +327,20 @@ return {
       if not ok then
         kong.log.err("failed to set Redis keepalive: ", err)
       end
+
+      if conf.sync_rate > 0 then
+        if cur_usage[cache_key] then
+          cur_usage[cache_key].value = current_metric or 0
+          cur_usage[cache_key].expire = unix_time() + EXPIRATION[period]
+        else
+          cur_usage[cache_key] = {
+            value = current_metric or 0,
+            expire = unix_time() + EXPIRATION[period]
+          }
+        end
+      end
+
+      cur_delta[cache_key] = 0
 
       return current_metric or 0
     end

@@ -91,6 +91,7 @@ return {
           { redis_timeout = { type = "number", default = 2000, }, },
           { redis_database = { type = "integer", default = 0 }, },
           { hide_client_headers = { type = "boolean", required = true, default = false }, },
+          { sync_rate = { type = "number", required = true, default = 0 } },
         },
         custom_validator = validate_periods_order,
       },
