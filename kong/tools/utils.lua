@@ -1468,8 +1468,4 @@ do
 end
 _M.time_ns = time_ns
 
-function _M.endswith(s, e)
-  return s and e and e ~= "" and s:sub(#s - #e + 1, #s) == e
-end
-
 return _M
