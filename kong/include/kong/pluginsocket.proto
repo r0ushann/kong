@@ -101,7 +101,7 @@ message String {
 
 message ExitArgs {
     int32 status = 1;
-    string body = 2;
+    bytes body = 2;
     google.protobuf.Struct headers = 3;
 }
 
