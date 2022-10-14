@@ -14,11 +14,11 @@ local ngx = ngx
 local kong = kong
 local ngx_var = ngx.var
 local ngx_sleep = ngx.sleep
+local worker_id = ngx.worker.id
 local coroutine_running = coroutine.running
 local get_plugin_info = proc_mgmt.get_plugin_info
 local get_ctx_table = require("resty.core.ctx").get_ctx_table
 local subsystem = ngx.config.subsystem
-local worker_id = ngx.worker.id
 
 
 local cjson_encode = cjson.encode
@@ -342,7 +342,6 @@ end
 function plugin_servers.start()
   local pluginserver_timer = proc_mgmt.pluginserver_timer
   local pluginserver_connection_check_timer = proc_mgmt.connection_check_timer
-  local native_timer_at = _G.native_timer_at
   local handler = worker_id() == 0 and pluginserver_timer or pluginserver_connection_check_timer
 
   for _, server_def in ipairs(proc_mgmt.get_server_defs()) do
