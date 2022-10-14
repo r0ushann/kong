@@ -14,7 +14,6 @@ local ngx = ngx
 local kong = kong
 local ngx_var = ngx.var
 local ngx_sleep = ngx.sleep
-local worker_id = ngx.worker.id
 local coroutine_running = coroutine.running
 local get_plugin_info = proc_mgmt.get_plugin_info
 local get_ctx_table = require("resty.core.ctx").get_ctx_table
